@@ -832,6 +832,334 @@ server.tool(
   }
 );
 
+// === DEALS (write) ===
+
+const dealWriteFields = {
+  title: z.string().optional().describe("Deal title"),
+  value: z.number().optional().describe("Deal value (numeric)"),
+  currency: z.string().optional().describe("ISO 4217 currency code, e.g. 'EUR', 'GBP', 'USD'"),
+  personId: z.number().optional().describe("Linked person ID"),
+  orgId: z.number().optional().describe("Linked organization ID"),
+  pipelineId: z.number().optional().describe("Pipeline ID"),
+  stageId: z.number().optional().describe("Stage ID (must belong to pipelineId if both given)"),
+  ownerId: z.number().optional().describe("Owner user ID"),
+  status: z.enum(['open', 'won', 'lost', 'deleted']).optional().describe("Deal status"),
+  expectedCloseDate: z.string().optional().describe("Expected close date (YYYY-MM-DD)"),
+  probability: z.number().optional().describe("Win probability 0-100"),
+  lostReason: z.string().optional().describe("Free-text reason if status is 'lost'"),
+  visibleTo: z.number().optional().describe("Visibility: 1=owner+followers, 3=entire company, 5=shared groups, 7=everyone"),
+};
+
+server.tool(
+  "create-deal",
+  "Create a new deal in Pipedrive. `title` is required.",
+  {
+    title: z.string().describe("Deal title (required)"),
+    ...Object.fromEntries(Object.entries(dealWriteFields).filter(([k]) => k !== 'title')),
+  },
+  async (input) => {
+    try {
+      const { title, value, currency, personId, orgId, pipelineId, stageId, ownerId, status, expectedCloseDate, probability, lostReason, visibleTo } = input as any;
+      const newDeal: Record<string, unknown> = { title };
+      if (value !== undefined) newDeal.value = String(value);
+      if (currency) newDeal.currency = currency;
+      if (personId !== undefined) newDeal.person_id = personId;
+      if (orgId !== undefined) newDeal.org_id = orgId;
+      if (pipelineId !== undefined) newDeal.pipeline_id = pipelineId;
+      if (stageId !== undefined) newDeal.stage_id = stageId;
+      if (ownerId !== undefined) newDeal.user_id = ownerId;
+      if (status) newDeal.status = status;
+      if (expectedCloseDate) newDeal.expected_close_date = expectedCloseDate;
+      if (probability !== undefined) newDeal.probability = probability;
+      if (lostReason) newDeal.lost_reason = lostReason;
+      if (visibleTo !== undefined) newDeal.visible_to = visibleTo;
+
+      // @ts-ignore - DealsApi.addDeal not in local types
+      const response = await dealsApi.addDeal({ newDeal });
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ summary: `Created deal ${response.data?.id}`, deal: response.data }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error("Error creating deal:", error);
+      return { content: [{ type: "text", text: `Error creating deal: ${getErrorMessage(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "update-deal",
+  "Update an existing deal. Only provide fields you want to change.",
+  {
+    dealId: z.number().describe("Pipedrive deal ID to update"),
+    ...dealWriteFields,
+  },
+  async (input) => {
+    try {
+      const { dealId, title, value, currency, personId, orgId, pipelineId, stageId, ownerId, status, expectedCloseDate, probability, lostReason, visibleTo } = input as any;
+      const updateDealRequest: Record<string, unknown> = {};
+      if (title !== undefined) updateDealRequest.title = title;
+      if (value !== undefined) updateDealRequest.value = String(value);
+      if (currency !== undefined) updateDealRequest.currency = currency;
+      if (personId !== undefined) updateDealRequest.person_id = personId;
+      if (orgId !== undefined) updateDealRequest.org_id = orgId;
+      if (pipelineId !== undefined) updateDealRequest.pipeline_id = pipelineId;
+      if (stageId !== undefined) updateDealRequest.stage_id = stageId;
+      if (ownerId !== undefined) updateDealRequest.user_id = ownerId;
+      if (status !== undefined) updateDealRequest.status = status;
+      if (expectedCloseDate !== undefined) updateDealRequest.expected_close_date = expectedCloseDate;
+      if (probability !== undefined) updateDealRequest.probability = probability;
+      if (lostReason !== undefined) updateDealRequest.lost_reason = lostReason;
+      if (visibleTo !== undefined) updateDealRequest.visible_to = visibleTo;
+
+      if (Object.keys(updateDealRequest).length === 0) {
+        return { content: [{ type: "text", text: "Error: provide at least one field to update." }], isError: true };
+      }
+
+      // @ts-ignore - DealsApi.updateDeal not in local types
+      const response = await dealsApi.updateDeal(dealId, { updateDealRequest });
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ summary: `Updated deal ${dealId}`, deal: response.data }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error(`Error updating deal ${(input as any).dealId}:`, error);
+      return { content: [{ type: "text", text: `Error updating deal: ${getErrorMessage(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "delete-deal",
+  "Delete a deal by ID. Pipedrive keeps it recoverable in trash for ~30 days.",
+  { dealId: z.number().describe("Pipedrive deal ID to delete") },
+  async ({ dealId }) => {
+    try {
+      // @ts-ignore - DealsApi.deleteDeal not in local types
+      const response = await dealsApi.deleteDeal(dealId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ summary: `Deleted deal ${dealId}`, result: response.data ?? { success: true } }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error(`Error deleting deal ${dealId}:`, error);
+      return { content: [{ type: "text", text: `Error deleting deal ${dealId}: ${getErrorMessage(error)}` }], isError: true };
+    }
+  }
+);
+
+// === PERSONS (write) ===
+
+const toContactArray = (vals: string[] | undefined) =>
+  vals?.map((value, i) => ({ value, primary: i === 0 }));
+
+const personWriteFields = {
+  name: z.string().optional().describe("Person's full name"),
+  ownerId: z.number().optional().describe("Owner user ID"),
+  orgId: z.number().optional().describe("Linked organization ID"),
+  emails: z.array(z.string()).optional().describe("Email addresses (first is marked primary)"),
+  phones: z.array(z.string()).optional().describe("Phone numbers (first is marked primary)"),
+  label: z.number().optional().describe("Label ID"),
+  visibleTo: z.number().optional().describe("Visibility: 1=owner+followers, 3=entire company, 5=shared groups, 7=everyone"),
+};
+
+server.tool(
+  "create-person",
+  "Create a new person in Pipedrive. `name` is required.",
+  {
+    name: z.string().describe("Person's full name (required)"),
+    ...Object.fromEntries(Object.entries(personWriteFields).filter(([k]) => k !== 'name')),
+  },
+  async (input) => {
+    try {
+      const { name, ownerId, orgId, emails, phones, label, visibleTo } = input as any;
+      const newPerson: Record<string, unknown> = { name };
+      if (ownerId !== undefined) newPerson.owner_id = ownerId;
+      if (orgId !== undefined) newPerson.org_id = orgId;
+      const emailArr = toContactArray(emails);
+      if (emailArr) newPerson.email = emailArr;
+      const phoneArr = toContactArray(phones);
+      if (phoneArr) newPerson.phone = phoneArr;
+      if (label !== undefined) newPerson.label = label;
+      if (visibleTo !== undefined) newPerson.visible_to = visibleTo;
+
+      // @ts-ignore - PersonsApi.addPerson not in local types
+      const response = await personsApi.addPerson({ newPerson });
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ summary: `Created person ${response.data?.id}`, person: response.data }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error("Error creating person:", error);
+      return { content: [{ type: "text", text: `Error creating person: ${getErrorMessage(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "update-person",
+  "Update an existing person. Only provide fields you want to change.",
+  {
+    personId: z.number().describe("Pipedrive person ID to update"),
+    ...personWriteFields,
+  },
+  async (input) => {
+    try {
+      const { personId, name, ownerId, orgId, emails, phones, label, visibleTo } = input as any;
+      const updatePerson: Record<string, unknown> = {};
+      if (name !== undefined) updatePerson.name = name;
+      if (ownerId !== undefined) updatePerson.owner_id = ownerId;
+      if (orgId !== undefined) updatePerson.org_id = orgId;
+      const emailArr = toContactArray(emails);
+      if (emailArr) updatePerson.email = emailArr;
+      const phoneArr = toContactArray(phones);
+      if (phoneArr) updatePerson.phone = phoneArr;
+      if (label !== undefined) updatePerson.label = label;
+      if (visibleTo !== undefined) updatePerson.visible_to = visibleTo;
+
+      if (Object.keys(updatePerson).length === 0) {
+        return { content: [{ type: "text", text: "Error: provide at least one field to update." }], isError: true };
+      }
+
+      // @ts-ignore - PersonsApi.updatePerson not in local types
+      const response = await personsApi.updatePerson(personId, { updatePerson });
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ summary: `Updated person ${personId}`, person: response.data }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error(`Error updating person ${(input as any).personId}:`, error);
+      return { content: [{ type: "text", text: `Error updating person: ${getErrorMessage(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "delete-person",
+  "Delete a person by ID. Pipedrive keeps them recoverable in trash for ~30 days.",
+  { personId: z.number().describe("Pipedrive person ID to delete") },
+  async ({ personId }) => {
+    try {
+      // @ts-ignore - PersonsApi.deletePerson not in local types
+      const response = await personsApi.deletePerson(personId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ summary: `Deleted person ${personId}`, result: response.data ?? { success: true } }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error(`Error deleting person ${personId}:`, error);
+      return { content: [{ type: "text", text: `Error deleting person ${personId}: ${getErrorMessage(error)}` }], isError: true };
+    }
+  }
+);
+
+// === ORGANIZATIONS (write) ===
+
+const organizationWriteFields = {
+  name: z.string().optional().describe("Organization name"),
+  ownerId: z.number().optional().describe("Owner user ID"),
+  label: z.number().optional().describe("Label ID"),
+  visibleTo: z.number().optional().describe("Visibility: 1=owner+followers, 3=entire company, 5=shared groups, 7=everyone"),
+};
+
+server.tool(
+  "create-organization",
+  "Create a new organization in Pipedrive. `name` is required.",
+  {
+    name: z.string().describe("Organization name (required)"),
+    ...Object.fromEntries(Object.entries(organizationWriteFields).filter(([k]) => k !== 'name')),
+  },
+  async (input) => {
+    try {
+      const { name, ownerId, label, visibleTo } = input as any;
+      const newOrganization: Record<string, unknown> = { name };
+      if (ownerId !== undefined) newOrganization.owner_id = ownerId;
+      if (label !== undefined) newOrganization.label = label;
+      if (visibleTo !== undefined) newOrganization.visible_to = visibleTo;
+
+      // @ts-ignore - OrganizationsApi.addOrganization not in local types
+      const response = await organizationsApi.addOrganization({ newOrganization });
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ summary: `Created organization ${response.data?.id}`, organization: response.data }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error("Error creating organization:", error);
+      return { content: [{ type: "text", text: `Error creating organization: ${getErrorMessage(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "update-organization",
+  "Update an existing organization. Only provide fields you want to change.",
+  {
+    organizationId: z.number().describe("Pipedrive organization ID to update"),
+    ...organizationWriteFields,
+  },
+  async (input) => {
+    try {
+      const { organizationId, name, ownerId, label, visibleTo } = input as any;
+      const updateOrganization: Record<string, unknown> = {};
+      if (name !== undefined) updateOrganization.name = name;
+      if (ownerId !== undefined) updateOrganization.owner_id = ownerId;
+      if (label !== undefined) updateOrganization.label = label;
+      if (visibleTo !== undefined) updateOrganization.visible_to = visibleTo;
+
+      if (Object.keys(updateOrganization).length === 0) {
+        return { content: [{ type: "text", text: "Error: provide at least one field to update." }], isError: true };
+      }
+
+      // @ts-ignore - OrganizationsApi.updateOrganization not in local types
+      const response = await organizationsApi.updateOrganization(organizationId, { updateOrganization });
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ summary: `Updated organization ${organizationId}`, organization: response.data }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error(`Error updating organization ${(input as any).organizationId}:`, error);
+      return { content: [{ type: "text", text: `Error updating organization: ${getErrorMessage(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "delete-organization",
+  "Delete an organization by ID. Pipedrive keeps it recoverable in trash for ~30 days.",
+  { organizationId: z.number().describe("Pipedrive organization ID to delete") },
+  async ({ organizationId }) => {
+    try {
+      // @ts-ignore - OrganizationsApi.deleteOrganization not in local types
+      const response = await organizationsApi.deleteOrganization(organizationId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ summary: `Deleted organization ${organizationId}`, result: response.data ?? { success: true } }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error(`Error deleting organization ${organizationId}:`, error);
+      return { content: [{ type: "text", text: `Error deleting organization ${organizationId}: ${getErrorMessage(error)}` }], isError: true };
+    }
+  }
+);
+
 // === NOTES (CRUD) ===
 
 const noteEntitySchema = {
