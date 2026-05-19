@@ -7,6 +7,7 @@ import * as dotenv from 'dotenv';
 import Bottleneck from 'bottleneck';
 import jwt from 'jsonwebtoken';
 import http from 'http';
+import * as crypto from 'crypto';
 
 // Type for error handling
 interface ErrorWithMessage {
@@ -53,18 +54,129 @@ const jwtVerifyOptions = {
 
 if (jwtSecret) {
   const bootToken = process.env.MCP_JWT_TOKEN;
-  if (!bootToken) {
-    console.error("ERROR: MCP_JWT_TOKEN environment variable is required when MCP_JWT_SECRET is set");
-    process.exit(1);
-  }
-
-  try {
-    jwt.verify(bootToken, jwtSecret, jwtVerifyOptions);
-  } catch (error) {
-    console.error("ERROR: Failed to verify MCP_JWT_TOKEN", error);
-    process.exit(1);
+  if (bootToken) {
+    try {
+      jwt.verify(bootToken, jwtSecret, jwtVerifyOptions);
+    } catch (error) {
+      console.error("ERROR: Failed to verify MCP_JWT_TOKEN", error);
+      process.exit(1);
+    }
   }
 }
+
+// === OAuth 2.1 setup ===
+const oauthPassword = process.env.MCP_AUTH_PASSWORD;
+const oauthEnabled = !!(oauthPassword && jwtSecret);
+if (oauthPassword && !jwtSecret) {
+  console.error("ERROR: MCP_AUTH_PASSWORD requires MCP_JWT_SECRET to be set");
+  process.exit(1);
+}
+
+const getPublicUrl = (req: http.IncomingMessage): string => {
+  if (process.env.MCP_PUBLIC_URL) return process.env.MCP_PUBLIC_URL.replace(/\/$/, '');
+  const proto = (req.headers['x-forwarded-proto'] as string) || 'https';
+  return `${proto}://${req.headers.host}`;
+};
+
+const signOAuthJwt = (payload: object, expiresIn?: number | string): string => {
+  const opts: jwt.SignOptions = { algorithm: jwtAlgorithm };
+  if (expiresIn !== undefined) (opts as any).expiresIn = expiresIn;
+  if (process.env.MCP_JWT_AUDIENCE) opts.audience = process.env.MCP_JWT_AUDIENCE;
+  if (process.env.MCP_JWT_ISSUER) opts.issuer = process.env.MCP_JWT_ISSUER;
+  return jwt.sign(payload, jwtSecret!, opts);
+};
+
+const verifyOAuthJwt = (token: string, expectedPurpose?: string): any => {
+  const payload = jwt.verify(token, jwtSecret!, jwtVerifyOptions) as any;
+  if (expectedPurpose && payload.purpose !== expectedPurpose) {
+    throw new Error('Invalid token purpose');
+  }
+  return payload;
+};
+
+const parseRequestBody = (req: http.IncomingMessage): Promise<Record<string, any>> => {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 1_000_000) { req.destroy(); reject(new Error('Body too large')); }
+    });
+    req.on('end', () => {
+      try {
+        const ct = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+        if (!body) return resolve({});
+        if (ct === 'application/json') return resolve(JSON.parse(body));
+        if (ct === 'application/x-www-form-urlencoded') return resolve(Object.fromEntries(new URLSearchParams(body)));
+        resolve({});
+      } catch (e) { reject(e); }
+    });
+    req.on('error', reject);
+  });
+};
+
+const pkceVerify = (challenge: string, verifier: string): boolean => {
+  const hash = crypto.createHash('sha256').update(verifier).digest('base64')
+    .replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  return hash === challenge;
+};
+
+const escapeHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>
+)[c]);
+
+const renderLoginPage = (params: Record<string, string>, error?: string): string => {
+  const hidden = Object.entries(params)
+    .map(([k, v]) => `<input type="hidden" name="${escapeHtml(k)}" value="${escapeHtml(v ?? '')}">`)
+    .join('\n      ');
+  const errorBlock = error ? `<div class="error">${escapeHtml(error)}</div>` : '';
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Authorize Claude — Pipedrive MCP</title>
+  <style>
+    body { font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f5f7; margin: 0; color: #1d1d1f; }
+    .card { max-width: 380px; margin: 80px auto; padding: 32px; background: white; border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,0.08); }
+    h1 { font-size: 18px; margin: 0 0 6px; }
+    p { color: #6e6e73; margin: 0 0 24px; line-height: 1.5; }
+    label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 13px; }
+    input[type=password] { width: 100%; padding: 10px 12px; border: 1px solid #d2d2d7; border-radius: 8px; box-sizing: border-box; font-size: 14px; }
+    input[type=password]:focus { outline: none; border-color: #007aff; box-shadow: 0 0 0 3px rgba(0,122,255,0.15); }
+    button { width: 100%; padding: 11px; background: #007aff; color: white; border: none; border-radius: 8px; margin-top: 20px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    button:hover { background: #0062cc; }
+    .error { color: #ff3b30; margin-top: 12px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Authorize Claude</h1>
+    <p>Enter the team password to let Claude connect to Pipedrive.</p>
+    <form method="post" action="/authorize">
+      <label for="password">Team password</label>
+      <input id="password" type="password" name="password" autofocus required>
+      ${hidden}
+      ${errorBlock}
+      <button type="submit">Authorize</button>
+    </form>
+  </div>
+</body>
+</html>`;
+};
+
+const jsonResponse = (res: http.ServerResponse, status: number, body: unknown) => {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(body));
+};
+
+const oauthErrorRedirect = (res: http.ServerResponse, redirectUri: string, error: string, description: string, state?: string) => {
+  const u = new URL(redirectUri);
+  u.searchParams.set('error', error);
+  u.searchParams.set('error_description', description);
+  if (state) u.searchParams.set('state', state);
+  res.writeHead(302, { Location: u.toString() });
+  res.end();
+};
 
 const verifyRequestAuthentication = (req: http.IncomingMessage) => {
   if (!jwtSecret) {
@@ -1733,6 +1845,177 @@ if (transportType === 'sse') {
       res.writeHead(204);
       res.end();
       return;
+    }
+
+    const publicUrl = getPublicUrl(req);
+    if (oauthEnabled) {
+      res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${publicUrl}/.well-known/oauth-protected-resource"`);
+    }
+
+    // === OAuth 2.1 routes ===
+
+    if (req.method === 'GET' && url.pathname === '/.well-known/oauth-protected-resource') {
+      return jsonResponse(res, 200, {
+        resource: publicUrl,
+        authorization_servers: oauthEnabled ? [publicUrl] : [],
+        bearer_methods_supported: ['header'],
+      });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/.well-known/oauth-authorization-server') {
+      if (!oauthEnabled) return jsonResponse(res, 404, { error: 'OAuth not enabled' });
+      return jsonResponse(res, 200, {
+        issuer: publicUrl,
+        authorization_endpoint: `${publicUrl}/authorize`,
+        token_endpoint: `${publicUrl}/token`,
+        registration_endpoint: `${publicUrl}/register`,
+        response_types_supported: ['code'],
+        grant_types_supported: ['authorization_code'],
+        code_challenge_methods_supported: ['S256'],
+        token_endpoint_auth_methods_supported: ['none'],
+        scopes_supported: ['mcp'],
+      });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/register') {
+      if (!oauthEnabled) return jsonResponse(res, 404, { error: 'OAuth not enabled' });
+      try {
+        const body = await parseRequestBody(req);
+        const redirectUris = Array.isArray(body.redirect_uris) ? body.redirect_uris : [];
+        if (redirectUris.length === 0) {
+          return jsonResponse(res, 400, { error: 'invalid_client_metadata', error_description: 'redirect_uris required' });
+        }
+        const clientId = signOAuthJwt({
+          purpose: 'client',
+          redirect_uris: redirectUris,
+          name: body.client_name,
+        });
+        return jsonResponse(res, 201, {
+          client_id: clientId,
+          client_id_issued_at: Math.floor(Date.now() / 1000),
+          redirect_uris: redirectUris,
+          token_endpoint_auth_method: 'none',
+          grant_types: ['authorization_code'],
+          response_types: ['code'],
+          client_name: body.client_name,
+        });
+      } catch (e) {
+        return jsonResponse(res, 400, { error: 'invalid_request', error_description: getErrorMessage(e) });
+      }
+    }
+
+    if (url.pathname === '/authorize' && (req.method === 'GET' || req.method === 'POST')) {
+      if (!oauthEnabled) return jsonResponse(res, 404, { error: 'OAuth not enabled' });
+
+      const params: Record<string, string> = req.method === 'GET'
+        ? Object.fromEntries(url.searchParams.entries())
+        : await parseRequestBody(req);
+
+      const clientIdToken = params.client_id;
+      const redirectUri = params.redirect_uri;
+      const responseType = params.response_type;
+      const codeChallenge = params.code_challenge;
+      const codeChallengeMethod = params.code_challenge_method;
+      const state = params.state;
+      const scope = params.scope;
+
+      let clientPayload: any;
+      try {
+        clientPayload = verifyOAuthJwt(clientIdToken, 'client');
+      } catch {
+        return jsonResponse(res, 400, { error: 'invalid_client', error_description: 'Unknown or invalid client_id' });
+      }
+
+      if (!redirectUri || !clientPayload.redirect_uris.includes(redirectUri)) {
+        return jsonResponse(res, 400, { error: 'invalid_request', error_description: 'redirect_uri not registered' });
+      }
+
+      if (responseType !== 'code') {
+        return oauthErrorRedirect(res, redirectUri, 'unsupported_response_type', 'Only response_type=code supported', state);
+      }
+      if (!codeChallenge || codeChallengeMethod !== 'S256') {
+        return oauthErrorRedirect(res, redirectUri, 'invalid_request', 'PKCE S256 required', state);
+      }
+
+      const formParams = {
+        client_id: clientIdToken,
+        redirect_uri: redirectUri,
+        response_type: responseType,
+        code_challenge: codeChallenge,
+        code_challenge_method: codeChallengeMethod,
+        state: state || '',
+        scope: scope || '',
+      };
+
+      if (req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(renderLoginPage(formParams));
+        return;
+      }
+
+      if (params.password !== oauthPassword) {
+        res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(renderLoginPage(formParams, 'Incorrect password. Try again.'));
+        return;
+      }
+
+      const authCode = signOAuthJwt({
+        purpose: 'auth_code',
+        client_id: clientIdToken,
+        redirect_uri: redirectUri,
+        code_challenge: codeChallenge,
+        scope: scope || 'mcp',
+      }, 60);
+
+      const u = new URL(redirectUri);
+      u.searchParams.set('code', authCode);
+      if (state) u.searchParams.set('state', state);
+      res.writeHead(302, { Location: u.toString() });
+      res.end();
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/token') {
+      if (!oauthEnabled) return jsonResponse(res, 404, { error: 'OAuth not enabled' });
+      try {
+        const body = await parseRequestBody(req);
+        if (body.grant_type !== 'authorization_code') {
+          return jsonResponse(res, 400, { error: 'unsupported_grant_type' });
+        }
+        const { code, code_verifier: codeVerifier, client_id: clientId, redirect_uri: redirectUri } = body as Record<string, string>;
+
+        let codePayload: any;
+        try {
+          codePayload = verifyOAuthJwt(code, 'auth_code');
+        } catch {
+          return jsonResponse(res, 400, { error: 'invalid_grant', error_description: 'Invalid or expired authorization code' });
+        }
+
+        if (codePayload.client_id !== clientId) {
+          return jsonResponse(res, 400, { error: 'invalid_grant', error_description: 'client_id mismatch' });
+        }
+        if (codePayload.redirect_uri !== redirectUri) {
+          return jsonResponse(res, 400, { error: 'invalid_grant', error_description: 'redirect_uri mismatch' });
+        }
+        if (!codeVerifier || !pkceVerify(codePayload.code_challenge, codeVerifier)) {
+          return jsonResponse(res, 400, { error: 'invalid_grant', error_description: 'PKCE verification failed' });
+        }
+
+        const accessToken = signOAuthJwt({
+          purpose: 'access',
+          sub: 'pt1-user',
+          scope: codePayload.scope,
+        }, '30d');
+
+        return jsonResponse(res, 200, {
+          access_token: accessToken,
+          token_type: 'Bearer',
+          expires_in: 30 * 24 * 3600,
+          scope: codePayload.scope,
+        });
+      } catch (e) {
+        return jsonResponse(res, 400, { error: 'invalid_request', error_description: getErrorMessage(e) });
+      }
     }
 
     if (req.method === 'GET' && url.pathname === '/sse') {
