@@ -169,6 +169,54 @@ const jsonResponse = (res: http.ServerResponse, status: number, body: unknown) =
   res.end(JSON.stringify(body));
 };
 
+// === Pipedrive REST helpers (used by write tools to avoid SDK quirks) ===
+
+const formatPipedriveError = (error: unknown): string => {
+  if (!error || typeof error !== 'object') return getErrorMessage(error);
+  const e = error as any;
+  const parts: string[] = [];
+  if (e.message) parts.push(e.message);
+  const status = e.status ?? e.errorCode;
+  if (status !== undefined) parts.push(`status=${status}`);
+  const body = e.body ?? e.context?._body;
+  if (body) {
+    const detail = typeof body === 'string' ? body : (body.error ? `${body.error}${body.error_info ? ` (${body.error_info})` : ''}` : JSON.stringify(body));
+    parts.push(`body=${detail}`);
+  }
+  return parts.length > 0 ? parts.join(' | ') : getErrorMessage(error);
+};
+
+const pipedriveFetch = async (
+  path: string,
+  options: { method?: string; body?: unknown; query?: Record<string, unknown> } = {}
+): Promise<any> => {
+  const { method = 'GET', body, query = {} } = options;
+  const params = new URLSearchParams();
+  params.set('api_token', process.env.PIPEDRIVE_API_TOKEN!);
+  for (const [k, v] of Object.entries(query)) {
+    if (v !== undefined && v !== null) params.set(k, String(v));
+  }
+  const url = `https://${process.env.PIPEDRIVE_DOMAIN}/api/v1${path}?${params}`;
+
+  return limiter.schedule(async () => {
+    const res = await fetch(url, {
+      method,
+      headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    const text = await res.text();
+    let data: any;
+    try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+    if (!res.ok || data?.success === false) {
+      const err: any = new Error(data?.error || `Pipedrive ${method} ${path} returned HTTP ${res.status}`);
+      err.status = res.status;
+      err.body = data;
+      throw err;
+    }
+    return data;
+  });
+};
+
 const oauthErrorRedirect = (res: http.ServerResponse, redirectUri: string, error: string, description: string, state?: string) => {
   const u = new URL(redirectUri);
   u.searchParams.set('error', error);
@@ -980,8 +1028,7 @@ server.tool(
       if (lostReason) newDeal.lost_reason = lostReason;
       if (visibleTo !== undefined) newDeal.visible_to = visibleTo;
 
-      // @ts-ignore - DealsApi.addDeal not in local types
-      const response = await dealsApi.addDeal({ newDeal });
+      const response = await pipedriveFetch('/deals', { method: 'POST', body: newDeal });
       return {
         content: [{
           type: "text",
@@ -989,8 +1036,8 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error("Error creating deal:", error);
-      return { content: [{ type: "text", text: `Error creating deal: ${getErrorMessage(error)}` }], isError: true };
+      console.error(`Error creating deal: ${formatPipedriveError(error)}`);
+      return { content: [{ type: "text", text: `Error creating deal: ${formatPipedriveError(error)}` }], isError: true };
     }
   }
 );
@@ -1024,8 +1071,7 @@ server.tool(
         return { content: [{ type: "text", text: "Error: provide at least one field to update." }], isError: true };
       }
 
-      // @ts-ignore - DealsApi.updateDeal not in local types
-      const response = await dealsApi.updateDeal(dealId, { updateDealRequest });
+      const response = await pipedriveFetch(`/deals/${dealId}`, { method: 'PUT', body: updateDealRequest });
       return {
         content: [{
           type: "text",
@@ -1033,8 +1079,8 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error(`Error updating deal ${(input as any).dealId}:`, error);
-      return { content: [{ type: "text", text: `Error updating deal: ${getErrorMessage(error)}` }], isError: true };
+      console.error(`Error updating deal ${(input as any).dealId}: ${formatPipedriveError(error)}`);
+      return { content: [{ type: "text", text: `Error updating deal: ${formatPipedriveError(error)}` }], isError: true };
     }
   }
 );
@@ -1045,8 +1091,7 @@ server.tool(
   { dealId: z.number().describe("Pipedrive deal ID to delete") },
   async ({ dealId }) => {
     try {
-      // @ts-ignore - DealsApi.deleteDeal not in local types
-      const response = await dealsApi.deleteDeal(dealId);
+      const response = await pipedriveFetch(`/deals/${dealId}`, { method: 'DELETE' });
       return {
         content: [{
           type: "text",
@@ -1054,8 +1099,8 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error(`Error deleting deal ${dealId}:`, error);
-      return { content: [{ type: "text", text: `Error deleting deal ${dealId}: ${getErrorMessage(error)}` }], isError: true };
+      console.error(`Error deleting deal ${dealId}: ${formatPipedriveError(error)}`);
+      return { content: [{ type: "text", text: `Error deleting deal ${dealId}: ${formatPipedriveError(error)}` }], isError: true };
     }
   }
 );
@@ -1095,8 +1140,7 @@ server.tool(
       if (label !== undefined) newPerson.label = label;
       if (visibleTo !== undefined) newPerson.visible_to = visibleTo;
 
-      // @ts-ignore - PersonsApi.addPerson not in local types
-      const response = await personsApi.addPerson({ newPerson });
+      const response = await pipedriveFetch('/persons', { method: 'POST', body: newPerson });
       return {
         content: [{
           type: "text",
@@ -1104,8 +1148,8 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error("Error creating person:", error);
-      return { content: [{ type: "text", text: `Error creating person: ${getErrorMessage(error)}` }], isError: true };
+      console.error(`Error creating person: ${formatPipedriveError(error)}`);
+      return { content: [{ type: "text", text: `Error creating person: ${formatPipedriveError(error)}` }], isError: true };
     }
   }
 );
@@ -1135,8 +1179,7 @@ server.tool(
         return { content: [{ type: "text", text: "Error: provide at least one field to update." }], isError: true };
       }
 
-      // @ts-ignore - PersonsApi.updatePerson not in local types
-      const response = await personsApi.updatePerson(personId, { updatePerson });
+      const response = await pipedriveFetch(`/persons/${personId}`, { method: 'PUT', body: updatePerson });
       return {
         content: [{
           type: "text",
@@ -1144,8 +1187,8 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error(`Error updating person ${(input as any).personId}:`, error);
-      return { content: [{ type: "text", text: `Error updating person: ${getErrorMessage(error)}` }], isError: true };
+      console.error(`Error updating person ${(input as any).personId}: ${formatPipedriveError(error)}`);
+      return { content: [{ type: "text", text: `Error updating person: ${formatPipedriveError(error)}` }], isError: true };
     }
   }
 );
@@ -1156,8 +1199,7 @@ server.tool(
   { personId: z.number().describe("Pipedrive person ID to delete") },
   async ({ personId }) => {
     try {
-      // @ts-ignore - PersonsApi.deletePerson not in local types
-      const response = await personsApi.deletePerson(personId);
+      const response = await pipedriveFetch(`/persons/${personId}`, { method: 'DELETE' });
       return {
         content: [{
           type: "text",
@@ -1165,8 +1207,8 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error(`Error deleting person ${personId}:`, error);
-      return { content: [{ type: "text", text: `Error deleting person ${personId}: ${getErrorMessage(error)}` }], isError: true };
+      console.error(`Error deleting person ${personId}: ${formatPipedriveError(error)}`);
+      return { content: [{ type: "text", text: `Error deleting person ${personId}: ${formatPipedriveError(error)}` }], isError: true };
     }
   }
 );
@@ -1195,8 +1237,7 @@ server.tool(
       if (label !== undefined) newOrganization.label = label;
       if (visibleTo !== undefined) newOrganization.visible_to = visibleTo;
 
-      // @ts-ignore - OrganizationsApi.addOrganization not in local types
-      const response = await organizationsApi.addOrganization({ newOrganization });
+      const response = await pipedriveFetch('/organizations', { method: 'POST', body: newOrganization });
       return {
         content: [{
           type: "text",
@@ -1204,8 +1245,8 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error("Error creating organization:", error);
-      return { content: [{ type: "text", text: `Error creating organization: ${getErrorMessage(error)}` }], isError: true };
+      console.error(`Error creating organization: ${formatPipedriveError(error)}`);
+      return { content: [{ type: "text", text: `Error creating organization: ${formatPipedriveError(error)}` }], isError: true };
     }
   }
 );
@@ -1230,8 +1271,7 @@ server.tool(
         return { content: [{ type: "text", text: "Error: provide at least one field to update." }], isError: true };
       }
 
-      // @ts-ignore - OrganizationsApi.updateOrganization not in local types
-      const response = await organizationsApi.updateOrganization(organizationId, { updateOrganization });
+      const response = await pipedriveFetch(`/organizations/${organizationId}`, { method: 'PUT', body: updateOrganization });
       return {
         content: [{
           type: "text",
@@ -1239,8 +1279,8 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error(`Error updating organization ${(input as any).organizationId}:`, error);
-      return { content: [{ type: "text", text: `Error updating organization: ${getErrorMessage(error)}` }], isError: true };
+      console.error(`Error updating organization ${(input as any).organizationId}: ${formatPipedriveError(error)}`);
+      return { content: [{ type: "text", text: `Error updating organization: ${formatPipedriveError(error)}` }], isError: true };
     }
   }
 );
@@ -1251,8 +1291,7 @@ server.tool(
   { organizationId: z.number().describe("Pipedrive organization ID to delete") },
   async ({ organizationId }) => {
     try {
-      // @ts-ignore - OrganizationsApi.deleteOrganization not in local types
-      const response = await organizationsApi.deleteOrganization(organizationId);
+      const response = await pipedriveFetch(`/organizations/${organizationId}`, { method: 'DELETE' });
       return {
         content: [{
           type: "text",
@@ -1260,8 +1299,8 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error(`Error deleting organization ${organizationId}:`, error);
-      return { content: [{ type: "text", text: `Error deleting organization ${organizationId}: ${getErrorMessage(error)}` }], isError: true };
+      console.error(`Error deleting organization ${organizationId}: ${formatPipedriveError(error)}`);
+      return { content: [{ type: "text", text: `Error deleting organization ${organizationId}: ${formatPipedriveError(error)}` }], isError: true };
     }
   }
 );
@@ -1309,8 +1348,7 @@ server.tool(
       if (labelIds) addLeadRequest.label_ids = labelIds;
       if (visibleTo !== undefined) addLeadRequest.visible_to = visibleTo;
 
-      // @ts-ignore - LeadsApi.addLead not in local types
-      const response = await leadsApi.addLead({ addLeadRequest });
+      const response = await pipedriveFetch('/leads', { method: 'POST', body: addLeadRequest });
       return {
         content: [{
           type: "text",
@@ -1318,8 +1356,8 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error("Error creating lead:", error);
-      return { content: [{ type: "text", text: `Error creating lead: ${getErrorMessage(error)}` }], isError: true };
+      console.error(`Error creating lead: ${formatPipedriveError(error)}`);
+      return { content: [{ type: "text", text: `Error creating lead: ${formatPipedriveError(error)}` }], isError: true };
     }
   }
 );
@@ -1332,8 +1370,7 @@ server.tool(
   },
   async ({ leadId }) => {
     try {
-      // @ts-ignore - LeadsApi.getLead not in local types
-      const response = await leadsApi.getLead(leadId);
+      const response = await pipedriveFetch(`/leads/${leadId}`);
       return {
         content: [{
           type: "text",
@@ -1341,8 +1378,8 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error(`Error fetching lead ${leadId}:`, error);
-      return { content: [{ type: "text", text: `Error fetching lead ${leadId}: ${getErrorMessage(error)}` }], isError: true };
+      console.error(`Error fetching lead ${leadId}: ${formatPipedriveError(error)}`);
+      return { content: [{ type: "text", text: `Error fetching lead ${leadId}: ${formatPipedriveError(error)}` }], isError: true };
     }
   }
 );
@@ -1362,16 +1399,15 @@ server.tool(
   },
   async ({ ownerId, personId, organizationId, archivedStatus, filterId, sort, limit = 100, start = 0 }) => {
     try {
-      const opts: Record<string, unknown> = { limit, start };
-      if (ownerId !== undefined) opts.ownerId = ownerId;
-      if (personId !== undefined) opts.personId = personId;
-      if (organizationId !== undefined) opts.organizationId = organizationId;
-      if (archivedStatus) opts.archivedStatus = archivedStatus;
-      if (filterId !== undefined) opts.filterId = filterId;
-      if (sort) opts.sort = sort;
+      const query: Record<string, unknown> = { limit, start };
+      if (ownerId !== undefined) query.owner_id = ownerId;
+      if (personId !== undefined) query.person_id = personId;
+      if (organizationId !== undefined) query.organization_id = organizationId;
+      if (archivedStatus) query.archived_status = archivedStatus;
+      if (filterId !== undefined) query.filter_id = filterId;
+      if (sort) query.sort = sort;
 
-      // @ts-ignore - LeadsApi.getLeads not in local types
-      const response = await leadsApi.getLeads(opts);
+      const response = await pipedriveFetch('/leads', { query });
       const leads = response.data || [];
 
       return {
@@ -1379,14 +1415,14 @@ server.tool(
           type: "text",
           text: JSON.stringify({
             summary: `Found ${leads.length} leads`,
-            filters_applied: opts,
+            filters_applied: query,
             leads
           }, null, 2)
         }]
       };
     } catch (error) {
-      console.error("Error listing leads:", error);
-      return { content: [{ type: "text", text: `Error listing leads: ${getErrorMessage(error)}` }], isError: true };
+      console.error(`Error listing leads: ${formatPipedriveError(error)}`);
+      return { content: [{ type: "text", text: `Error listing leads: ${formatPipedriveError(error)}` }], isError: true };
     }
   }
 );
@@ -1418,8 +1454,7 @@ server.tool(
         return { content: [{ type: "text", text: "Error: provide at least one field to update." }], isError: true };
       }
 
-      // @ts-ignore - LeadsApi.updateLead not in local types
-      const response = await leadsApi.updateLead(leadId, { updateLeadRequest });
+      const response = await pipedriveFetch(`/leads/${leadId}`, { method: 'PATCH', body: updateLeadRequest });
       return {
         content: [{
           type: "text",
@@ -1427,8 +1462,8 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error(`Error updating lead ${(input as any).leadId}:`, error);
-      return { content: [{ type: "text", text: `Error updating lead: ${getErrorMessage(error)}` }], isError: true };
+      console.error(`Error updating lead ${(input as any).leadId}: ${formatPipedriveError(error)}`);
+      return { content: [{ type: "text", text: `Error updating lead: ${formatPipedriveError(error)}` }], isError: true };
     }
   }
 );
@@ -1439,8 +1474,7 @@ server.tool(
   { leadId: z.string().describe("Pipedrive lead ID (UUID) to delete") },
   async ({ leadId }) => {
     try {
-      // @ts-ignore - LeadsApi.deleteLead not in local types
-      const response = await leadsApi.deleteLead(leadId);
+      const response = await pipedriveFetch(`/leads/${leadId}`, { method: 'DELETE' });
       return {
         content: [{
           type: "text",
@@ -1448,8 +1482,8 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error(`Error deleting lead ${leadId}:`, error);
-      return { content: [{ type: "text", text: `Error deleting lead ${leadId}: ${getErrorMessage(error)}` }], isError: true };
+      console.error(`Error deleting lead ${leadId}: ${formatPipedriveError(error)}`);
+      return { content: [{ type: "text", text: `Error deleting lead ${leadId}: ${formatPipedriveError(error)}` }], isError: true };
     }
   }
 );
@@ -1491,8 +1525,7 @@ server.tool(
       if (leadId !== undefined) addNoteRequest.lead_id = leadId;
       if (userId !== undefined) addNoteRequest.user_id = userId;
 
-      // @ts-ignore - NotesApi types not declared locally
-      const response = await notesApi.addNote({ addNoteRequest });
+      const response = await pipedriveFetch('/notes', { method: 'POST', body: addNoteRequest });
 
       return {
         content: [{
@@ -1504,11 +1537,11 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error("Error creating note:", error);
+      console.error(`Error creating note: ${formatPipedriveError(error)}`);
       return {
         content: [{
           type: "text",
-          text: `Error creating note: ${getErrorMessage(error)}`
+          text: `Error creating note: ${formatPipedriveError(error)}`
         }],
         isError: true
       };
@@ -1525,8 +1558,7 @@ server.tool(
   },
   async ({ noteId }) => {
     try {
-      // @ts-ignore - NotesApi types not declared locally
-      const response = await notesApi.getNote(noteId);
+      const response = await pipedriveFetch(`/notes/${noteId}`);
       return {
         content: [{
           type: "text",
@@ -1534,11 +1566,11 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error(`Error fetching note ${noteId}:`, error);
+      console.error(`Error fetching note ${noteId}: ${formatPipedriveError(error)}`);
       return {
         content: [{
           type: "text",
-          text: `Error fetching note ${noteId}: ${getErrorMessage(error)}`
+          text: `Error fetching note ${noteId}: ${formatPipedriveError(error)}`
         }],
         isError: true
       };
@@ -1561,18 +1593,17 @@ server.tool(
   },
   async ({ dealId, personId, orgId, leadId, userId, startDate, endDate, sort, limit = 50, start = 0 }) => {
     try {
-      const opts: Record<string, unknown> = { limit, start };
-      if (dealId !== undefined) opts.dealId = dealId;
-      if (personId !== undefined) opts.personId = personId;
-      if (orgId !== undefined) opts.orgId = orgId;
-      if (leadId !== undefined) opts.leadId = leadId;
-      if (userId !== undefined) opts.userId = userId;
-      if (startDate) opts.startDate = startDate;
-      if (endDate) opts.endDate = endDate;
-      if (sort) opts.sort = sort;
+      const query: Record<string, unknown> = { limit, start };
+      if (dealId !== undefined) query.deal_id = dealId;
+      if (personId !== undefined) query.person_id = personId;
+      if (orgId !== undefined) query.org_id = orgId;
+      if (leadId !== undefined) query.lead_id = leadId;
+      if (userId !== undefined) query.user_id = userId;
+      if (startDate) query.start_date = startDate;
+      if (endDate) query.end_date = endDate;
+      if (sort) query.sort = sort;
 
-      // @ts-ignore - NotesApi types not declared locally
-      const response = await notesApi.getNotes(opts);
+      const response = await pipedriveFetch('/notes', { query });
       const notes = response.data || [];
 
       return {
@@ -1580,17 +1611,17 @@ server.tool(
           type: "text",
           text: JSON.stringify({
             summary: `Found ${notes.length} notes`,
-            filters_applied: opts,
+            filters_applied: query,
             notes
           }, null, 2)
         }]
       };
     } catch (error) {
-      console.error("Error listing notes:", error);
+      console.error(`Error listing notes: ${formatPipedriveError(error)}`);
       return {
         content: [{
           type: "text",
-          text: `Error listing notes: ${getErrorMessage(error)}`
+          text: `Error listing notes: ${formatPipedriveError(error)}`
         }],
         isError: true
       };
@@ -1628,8 +1659,7 @@ server.tool(
         };
       }
 
-      // @ts-ignore - NotesApi types not declared locally
-      const response = await notesApi.updateNote(noteId, { note });
+      const response = await pipedriveFetch(`/notes/${noteId}`, { method: 'PUT', body: note });
 
       return {
         content: [{
@@ -1641,11 +1671,11 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error(`Error updating note ${noteId}:`, error);
+      console.error(`Error updating note ${noteId}: ${formatPipedriveError(error)}`);
       return {
         content: [{
           type: "text",
-          text: `Error updating note ${noteId}: ${getErrorMessage(error)}`
+          text: `Error updating note ${noteId}: ${formatPipedriveError(error)}`
         }],
         isError: true
       };
@@ -1662,8 +1692,7 @@ server.tool(
   },
   async ({ noteId }) => {
     try {
-      // @ts-ignore - NotesApi types not declared locally
-      const response = await notesApi.deleteNote(noteId);
+      const response = await pipedriveFetch(`/notes/${noteId}`, { method: 'DELETE' });
       return {
         content: [{
           type: "text",
@@ -1674,11 +1703,11 @@ server.tool(
         }]
       };
     } catch (error) {
-      console.error(`Error deleting note ${noteId}:`, error);
+      console.error(`Error deleting note ${noteId}: ${formatPipedriveError(error)}`);
       return {
         content: [{
           type: "text",
-          text: `Error deleting note ${noteId}: ${getErrorMessage(error)}`
+          text: `Error deleting note ${noteId}: ${formatPipedriveError(error)}`
         }],
         isError: true
       };
