@@ -1160,6 +1160,194 @@ server.tool(
   }
 );
 
+// === LEADS (CRUD) ===
+
+const leadWriteFields = {
+  title: z.string().optional().describe("Lead title"),
+  ownerId: z.number().optional().describe("Owner user ID"),
+  personId: z.number().optional().describe("Linked person ID"),
+  organizationId: z.number().optional().describe("Linked organization ID"),
+  valueAmount: z.number().optional().describe("Lead value amount"),
+  valueCurrency: z.string().optional().describe("Lead value currency (ISO 4217, e.g. 'EUR')"),
+  expectedCloseDate: z.string().optional().describe("Expected close date (YYYY-MM-DD)"),
+  labelIds: z.array(z.string()).optional().describe("Label UUIDs"),
+  visibleTo: z.number().optional().describe("Visibility: 1=owner+followers, 3=entire company, 5=shared groups, 7=everyone"),
+};
+
+const buildLeadValue = (amount?: number, currency?: string) => {
+  if (amount === undefined && !currency) return undefined;
+  return { amount: amount ?? 0, currency: currency ?? 'EUR' };
+};
+
+server.tool(
+  "create-lead",
+  "Create a new lead in Pipedrive. `title` is required. A lead must be linked to a person or organization.",
+  {
+    title: z.string().describe("Lead title (required)"),
+    ...Object.fromEntries(Object.entries(leadWriteFields).filter(([k]) => k !== 'title')),
+  },
+  async (input) => {
+    try {
+      const { title, ownerId, personId, organizationId, valueAmount, valueCurrency, expectedCloseDate, labelIds, visibleTo } = input as any;
+      if (personId === undefined && organizationId === undefined) {
+        return { content: [{ type: "text", text: "Error: a lead must be linked to a person (personId) or organization (organizationId)." }], isError: true };
+      }
+
+      const addLeadRequest: Record<string, unknown> = { title };
+      if (ownerId !== undefined) addLeadRequest.owner_id = ownerId;
+      if (personId !== undefined) addLeadRequest.person_id = personId;
+      if (organizationId !== undefined) addLeadRequest.organization_id = organizationId;
+      const value = buildLeadValue(valueAmount, valueCurrency);
+      if (value) addLeadRequest.value = value;
+      if (expectedCloseDate) addLeadRequest.expected_close_date = expectedCloseDate;
+      if (labelIds) addLeadRequest.label_ids = labelIds;
+      if (visibleTo !== undefined) addLeadRequest.visible_to = visibleTo;
+
+      // @ts-ignore - LeadsApi.addLead not in local types
+      const response = await leadsApi.addLead({ addLeadRequest });
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ summary: `Created lead ${response.data?.id}`, lead: response.data }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error("Error creating lead:", error);
+      return { content: [{ type: "text", text: `Error creating lead: ${getErrorMessage(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "get-lead",
+  "Get a single lead by its ID (UUID string).",
+  {
+    leadId: z.string().describe("Pipedrive lead ID (UUID)")
+  },
+  async ({ leadId }) => {
+    try {
+      // @ts-ignore - LeadsApi.getLead not in local types
+      const response = await leadsApi.getLead(leadId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(response.data, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error(`Error fetching lead ${leadId}:`, error);
+      return { content: [{ type: "text", text: `Error fetching lead ${leadId}: ${getErrorMessage(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "list-leads",
+  "List leads from Pipedrive, optionally filtered by owner, person, organization, or archived status.",
+  {
+    ownerId: z.number().optional().describe("Filter by owner user ID"),
+    personId: z.number().optional().describe("Filter by linked person ID"),
+    organizationId: z.number().optional().describe("Filter by linked organization ID"),
+    archivedStatus: z.enum(['archived', 'not_archived', 'all']).optional().describe("Archived filter (default 'all')"),
+    filterId: z.number().optional().describe("Apply a saved filter by ID"),
+    sort: z.string().optional().describe("Sort, e.g. 'update_time DESC'"),
+    limit: z.number().optional().describe("Max leads to return (default 100)"),
+    start: z.number().optional().describe("Pagination start offset (default 0)"),
+  },
+  async ({ ownerId, personId, organizationId, archivedStatus, filterId, sort, limit = 100, start = 0 }) => {
+    try {
+      const opts: Record<string, unknown> = { limit, start };
+      if (ownerId !== undefined) opts.ownerId = ownerId;
+      if (personId !== undefined) opts.personId = personId;
+      if (organizationId !== undefined) opts.organizationId = organizationId;
+      if (archivedStatus) opts.archivedStatus = archivedStatus;
+      if (filterId !== undefined) opts.filterId = filterId;
+      if (sort) opts.sort = sort;
+
+      // @ts-ignore - LeadsApi.getLeads not in local types
+      const response = await leadsApi.getLeads(opts);
+      const leads = response.data || [];
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            summary: `Found ${leads.length} leads`,
+            filters_applied: opts,
+            leads
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error("Error listing leads:", error);
+      return { content: [{ type: "text", text: `Error listing leads: ${getErrorMessage(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "update-lead",
+  "Update an existing lead. Only provide fields you want to change. Use `isArchived` to archive/unarchive.",
+  {
+    leadId: z.string().describe("Pipedrive lead ID (UUID)"),
+    ...leadWriteFields,
+    isArchived: z.boolean().optional().describe("Archive (true) or unarchive (false) the lead"),
+  },
+  async (input) => {
+    try {
+      const { leadId, title, ownerId, personId, organizationId, valueAmount, valueCurrency, expectedCloseDate, labelIds, visibleTo, isArchived } = input as any;
+      const updateLeadRequest: Record<string, unknown> = {};
+      if (title !== undefined) updateLeadRequest.title = title;
+      if (ownerId !== undefined) updateLeadRequest.owner_id = ownerId;
+      if (personId !== undefined) updateLeadRequest.person_id = personId;
+      if (organizationId !== undefined) updateLeadRequest.organization_id = organizationId;
+      const value = buildLeadValue(valueAmount, valueCurrency);
+      if (value) updateLeadRequest.value = value;
+      if (expectedCloseDate !== undefined) updateLeadRequest.expected_close_date = expectedCloseDate;
+      if (labelIds !== undefined) updateLeadRequest.label_ids = labelIds;
+      if (visibleTo !== undefined) updateLeadRequest.visible_to = visibleTo;
+      if (isArchived !== undefined) updateLeadRequest.is_archived = isArchived;
+
+      if (Object.keys(updateLeadRequest).length === 0) {
+        return { content: [{ type: "text", text: "Error: provide at least one field to update." }], isError: true };
+      }
+
+      // @ts-ignore - LeadsApi.updateLead not in local types
+      const response = await leadsApi.updateLead(leadId, { updateLeadRequest });
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ summary: `Updated lead ${leadId}`, lead: response.data }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error(`Error updating lead ${(input as any).leadId}:`, error);
+      return { content: [{ type: "text", text: `Error updating lead: ${getErrorMessage(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "delete-lead",
+  "Delete a lead by ID.",
+  { leadId: z.string().describe("Pipedrive lead ID (UUID) to delete") },
+  async ({ leadId }) => {
+    try {
+      // @ts-ignore - LeadsApi.deleteLead not in local types
+      const response = await leadsApi.deleteLead(leadId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ summary: `Deleted lead ${leadId}`, result: response.data ?? { success: true } }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error(`Error deleting lead ${leadId}:`, error);
+      return { content: [{ type: "text", text: `Error deleting lead ${leadId}: ${getErrorMessage(error)}` }], isError: true };
+    }
+  }
+);
+
 // === NOTES (CRUD) ===
 
 const noteEntitySchema = {
