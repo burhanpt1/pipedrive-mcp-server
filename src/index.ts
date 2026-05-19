@@ -240,6 +240,8 @@ const leadsApi = withRateLimit(new pipedrive.LeadsApi(apiClient));
 const activitiesApi = withRateLimit(new pipedrive.ActivitiesApi(apiClient));
 // @ts-ignore - NotesApi exists but may not be in type definitions
 const notesApi = withRateLimit(new pipedrive.NotesApi(apiClient));
+// @ts-ignore - StagesApi exists but may not be in type definitions
+const stagesApi = withRateLimit(new (pipedrive as any).StagesApi(apiClient));
 // @ts-ignore - UsersApi exists but may not be in type definitions
 const usersApi = withRateLimit(new pipedrive.UsersApi(apiClient));
 
@@ -831,40 +833,32 @@ server.tool(
 // Get all stages
 server.tool(
   "get-stages",
-  "Get all stages from Pipedrive",
-  {},
-  async () => {
+  "Get all stages from Pipedrive, optionally filtered by pipeline. Each stage is enriched with its pipeline name.",
+  {
+    pipelineId: z.number().optional().describe("Restrict to stages in this pipeline")
+  },
+  async ({ pipelineId }) => {
     try {
-      // Since the stages are related to pipelines, we'll get all pipelines first
-      const pipelinesResponse = await pipelinesApi.getPipelines();
-      const pipelines = pipelinesResponse.data || [];
-      
-      // For each pipeline, fetch its stages
-      const allStages = [];
-      for (const pipeline of pipelines) {
-        try {
-          // @ts-ignore - Type definitions for getPipelineStages are incomplete
-          const stagesResponse = await pipelinesApi.getPipelineStages(pipeline.id);
-          const stagesData = Array.isArray(stagesResponse?.data)
-            ? stagesResponse.data
-            : [];
+      const [stagesResponse, pipelinesResponse] = await Promise.all([
+        // @ts-ignore - StagesApi types not declared locally
+        stagesApi.getStages(pipelineId !== undefined ? { pipelineId } : {}),
+        pipelinesApi.getPipelines(),
+      ]);
 
-          if (stagesData.length > 0) {
-            const pipelineStages = stagesData.map((stage: any) => ({
-              ...stage,
-              pipeline_name: pipeline.name
-            }));
-            allStages.push(...pipelineStages);
-          }
-        } catch (e) {
-          console.error(`Error fetching stages for pipeline ${pipeline.id}:`, e);
-        }
+      const pipelineNameById = new Map<number, string>();
+      for (const p of (pipelinesResponse.data || [])) {
+        pipelineNameById.set(p.id, p.name);
       }
-      
+
+      const stages = (stagesResponse.data || []).map((stage: any) => ({
+        ...stage,
+        pipeline_name: pipelineNameById.get(stage.pipeline_id) || 'Unknown',
+      }));
+
       return {
         content: [{
           type: "text",
-          text: JSON.stringify(allStages, null, 2)
+          text: JSON.stringify(stages, null, 2)
         }]
       };
     } catch (error) {
