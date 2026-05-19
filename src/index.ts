@@ -134,7 +134,7 @@ const usersApi = withRateLimit(new pipedrive.UsersApi(apiClient));
 // Create MCP server
 const server = new McpServer({
   name: "pipedrive-mcp-server",
-  version: "1.0.2",
+  version: "1.1.0",
   capabilities: {
     resources: {},
     tools: {},
@@ -304,30 +304,33 @@ server.tool(
         limit_applied: limit
       };
 
-      // Summarize deals to avoid massive responses but include notes and booking details
-      const bookingFieldKey = "8f4b27fbd9dfc70d2296f23ce76987051ad7324e";
-      const summarizedDeals = filteredDeals.map((deal: any) => ({
-        id: deal.id,
-        title: deal.title,
-        value: deal.value,
-        currency: deal.currency,
-        status: deal.status,
-        stage_name: deal.stage?.name || 'Unknown',
-        pipeline_name: deal.pipeline?.name || 'Unknown',
-        owner_name: deal.owner?.name || 'Unknown',
-        organization_name: deal.org?.name || null,
-        person_name: deal.person?.name || null,
-        add_time: deal.add_time,
-        last_activity_date: deal.last_activity_date,
-        close_time: deal.close_time,
-        won_time: deal.won_time,
-        lost_time: deal.lost_time,
-        notes_count: deal.notes_count || 0,
-        // Include recent notes if available
-        notes: deal.notes || [],
-        // Include custom booking details field
-        booking_details: deal[bookingFieldKey] || null
-      }));
+      // Summarize deals to avoid massive responses
+      const customFieldKey = process.env.PIPEDRIVE_CUSTOM_FIELD_KEY;
+      const summarizedDeals = filteredDeals.map((deal: any) => {
+        const summary: any = {
+          id: deal.id,
+          title: deal.title,
+          value: deal.value,
+          currency: deal.currency,
+          status: deal.status,
+          stage_name: deal.stage?.name || 'Unknown',
+          pipeline_name: deal.pipeline?.name || 'Unknown',
+          owner_name: deal.owner?.name || 'Unknown',
+          organization_name: deal.org?.name || null,
+          person_name: deal.person?.name || null,
+          add_time: deal.add_time,
+          last_activity_date: deal.last_activity_date,
+          close_time: deal.close_time,
+          won_time: deal.won_time,
+          lost_time: deal.lost_time,
+          notes_count: deal.notes_count || 0,
+          notes: deal.notes || [],
+        };
+        if (customFieldKey && deal[customFieldKey]) {
+          summary.custom_field = deal[customFieldKey];
+        }
+        return summary;
+      });
 
       return {
         content: [{
@@ -407,10 +410,9 @@ server.tool(
         const dealResponse = await dealsApi.getDeal(dealId);
         const deal = dealResponse.data;
 
-        // Extract custom booking field
-        const bookingFieldKey = "8f4b27fbd9dfc70d2296f23ce76987051ad7324e";
-        if (deal && deal[bookingFieldKey]) {
-          result.booking_details = deal[bookingFieldKey];
+        const customFieldKey = process.env.PIPEDRIVE_CUSTOM_FIELD_KEY;
+        if (customFieldKey && deal && deal[customFieldKey]) {
+          result.booking_details = deal[customFieldKey];
         }
       } catch (dealError) {
         console.error(`Error fetching deal details for ${dealId}:`, dealError);
@@ -823,6 +825,238 @@ server.tool(
         content: [{
           type: "text",
           text: `Error performing search: ${getErrorMessage(error)}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+// === NOTES (CRUD) ===
+
+const noteEntitySchema = {
+  dealId: z.number().optional().describe("Attach the note to this deal ID"),
+  personId: z.number().optional().describe("Attach the note to this person ID"),
+  orgId: z.number().optional().describe("Attach the note to this organization ID"),
+  leadId: z.string().optional().describe("Attach the note to this lead ID (UUID string)"),
+};
+
+// Create a note
+server.tool(
+  "create-note",
+  "Create a note in Pipedrive. The note must be attached to at least one entity (deal, person, organization, or lead). Returns the created note with its ID.",
+  {
+    content: z.string().describe("Note content (supports HTML)"),
+    ...noteEntitySchema,
+    userId: z.number().optional().describe("User who owns the note (defaults to API token owner)"),
+  },
+  async ({ content, dealId, personId, orgId, leadId, userId }) => {
+    try {
+      if (!dealId && !personId && !orgId && !leadId) {
+        return {
+          content: [{
+            type: "text",
+            text: "Error: a note must be attached to at least one of dealId, personId, orgId, or leadId."
+          }],
+          isError: true
+        };
+      }
+
+      const addNoteRequest: Record<string, unknown> = { content };
+      if (dealId !== undefined) addNoteRequest.deal_id = dealId;
+      if (personId !== undefined) addNoteRequest.person_id = personId;
+      if (orgId !== undefined) addNoteRequest.org_id = orgId;
+      if (leadId !== undefined) addNoteRequest.lead_id = leadId;
+      if (userId !== undefined) addNoteRequest.user_id = userId;
+
+      // @ts-ignore - NotesApi types not declared locally
+      const response = await notesApi.addNote({ addNoteRequest });
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            summary: `Created note ${response.data?.id}`,
+            note: response.data
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error("Error creating note:", error);
+      return {
+        content: [{
+          type: "text",
+          text: `Error creating note: ${getErrorMessage(error)}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Get a single note by ID
+server.tool(
+  "get-note",
+  "Get a single note by its ID",
+  {
+    noteId: z.number().describe("Pipedrive note ID")
+  },
+  async ({ noteId }) => {
+    try {
+      // @ts-ignore - NotesApi types not declared locally
+      const response = await notesApi.getNote(noteId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(response.data, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error(`Error fetching note ${noteId}:`, error);
+      return {
+        content: [{
+          type: "text",
+          text: `Error fetching note ${noteId}: ${getErrorMessage(error)}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+// List notes with filters
+server.tool(
+  "list-notes",
+  "List notes from Pipedrive, optionally filtered by deal, person, organization, lead, user, or date range.",
+  {
+    ...noteEntitySchema,
+    userId: z.number().optional().describe("Filter notes by author user ID"),
+    startDate: z.string().optional().describe("Earliest note date (YYYY-MM-DD)"),
+    endDate: z.string().optional().describe("Latest note date (YYYY-MM-DD)"),
+    sort: z.string().optional().describe("Sort, e.g. 'update_time DESC' (supported fields: id, user_id, deal_id, person_id, org_id, content, add_time, update_time)"),
+    limit: z.number().optional().describe("Max notes to return (default 50, max 500)"),
+    start: z.number().optional().describe("Pagination start offset (default 0)"),
+  },
+  async ({ dealId, personId, orgId, leadId, userId, startDate, endDate, sort, limit = 50, start = 0 }) => {
+    try {
+      const opts: Record<string, unknown> = { limit, start };
+      if (dealId !== undefined) opts.dealId = dealId;
+      if (personId !== undefined) opts.personId = personId;
+      if (orgId !== undefined) opts.orgId = orgId;
+      if (leadId !== undefined) opts.leadId = leadId;
+      if (userId !== undefined) opts.userId = userId;
+      if (startDate) opts.startDate = startDate;
+      if (endDate) opts.endDate = endDate;
+      if (sort) opts.sort = sort;
+
+      // @ts-ignore - NotesApi types not declared locally
+      const response = await notesApi.getNotes(opts);
+      const notes = response.data || [];
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            summary: `Found ${notes.length} notes`,
+            filters_applied: opts,
+            notes
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error("Error listing notes:", error);
+      return {
+        content: [{
+          type: "text",
+          text: `Error listing notes: ${getErrorMessage(error)}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Update a note
+server.tool(
+  "update-note",
+  "Update an existing note. Only provide fields you want to change. At minimum, content is usually what you'd change.",
+  {
+    noteId: z.number().describe("Pipedrive note ID to update"),
+    content: z.string().optional().describe("New note content"),
+    ...noteEntitySchema,
+    userId: z.number().optional().describe("Reassign the note to this user"),
+  },
+  async ({ noteId, content, dealId, personId, orgId, leadId, userId }) => {
+    try {
+      const note: Record<string, unknown> = {};
+      if (content !== undefined) note.content = content;
+      if (dealId !== undefined) note.deal_id = dealId;
+      if (personId !== undefined) note.person_id = personId;
+      if (orgId !== undefined) note.org_id = orgId;
+      if (leadId !== undefined) note.lead_id = leadId;
+      if (userId !== undefined) note.user_id = userId;
+
+      if (Object.keys(note).length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: "Error: nothing to update — provide at least one field (content, dealId, personId, orgId, leadId, or userId)."
+          }],
+          isError: true
+        };
+      }
+
+      // @ts-ignore - NotesApi types not declared locally
+      const response = await notesApi.updateNote(noteId, { note });
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            summary: `Updated note ${noteId}`,
+            note: response.data
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error(`Error updating note ${noteId}:`, error);
+      return {
+        content: [{
+          type: "text",
+          text: `Error updating note ${noteId}: ${getErrorMessage(error)}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Delete a note
+server.tool(
+  "delete-note",
+  "Delete a note by its ID. This is destructive and cannot be undone via the API.",
+  {
+    noteId: z.number().describe("Pipedrive note ID to delete")
+  },
+  async ({ noteId }) => {
+    try {
+      // @ts-ignore - NotesApi types not declared locally
+      const response = await notesApi.deleteNote(noteId);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            summary: `Deleted note ${noteId}`,
+            result: response.data ?? { success: true }
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error(`Error deleting note ${noteId}:`, error);
+      return {
+        content: [{
+          type: "text",
+          text: `Error deleting note ${noteId}: ${getErrorMessage(error)}`
         }],
         isError: true
       };
