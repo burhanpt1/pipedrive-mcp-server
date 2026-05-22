@@ -986,6 +986,60 @@ server.tool(
   }
 );
 
+// SIA semantic search
+server.tool(
+  "sia-semantic-search",
+  "Search VC deals in SIA (Strategic Investment Automation) using semantic/vector similarity. Much better than keyword search for finding deals by concept, theme, or description. Returns up to 20 deals ranked by relevance score. Each result includes title, one-line pitch, sector, stage, deal status, and owner.",
+  {
+    query: z.string().describe("Natural language search query, e.g. 'climate tech in emerging markets' or 'B2B SaaS with strong retention metrics'")
+  },
+  async ({ query }) => {
+    const apiKey = process.env.SIA_API_KEY;
+    if (!apiKey) {
+      return {
+        content: [{ type: "text", text: "Error: SIA_API_KEY environment variable is not set" }],
+        isError: true
+      };
+    }
+
+    try {
+      const url = new URL('https://sia.pt1.vc/api/smart-search');
+      url.searchParams.set('q', query);
+
+      const res = await fetch(url.toString(), {
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(15000),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        return {
+          content: [{ type: "text", text: `SIA search failed (HTTP ${res.status}): ${text}` }],
+          isError: true
+        };
+      }
+
+      const data = await res.json() as any;
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            summary: `Found ${data.total_found ?? 0} deals for query "${query}"`,
+            query: data.query,
+            results: data.results ?? []
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error(`Error calling SIA semantic search: ${getErrorMessage(error)}`);
+      return {
+        content: [{ type: "text", text: `Error calling SIA semantic search: ${getErrorMessage(error)}` }],
+        isError: true
+      };
+    }
+  }
+);
+
 // === DEALS (write) ===
 
 const dealWriteFields = {
